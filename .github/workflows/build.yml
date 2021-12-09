@@ -1,0 +1,44 @@
+name: build
+
+on:
+  create:
+    tags:
+     - '*'
+
+jobs:
+  build:
+    name: Building on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+         - os: ubuntu-latest
+           helmz_artifact_name: helmz
+           helmz_asset_name: helmz-linux-amd64
+         - os: windows-latest
+           helmz_artifact_name: helmz.exe
+           helmz_asset_name: helmz-windows-amd64.exe
+         - os: macos-latest
+           helmz_artifact_name: helmz
+           helmz_asset_name: helmz-macos-amd64
+    steps:
+    - uses: actions/checkout@v2
+
+    - name: Set up Go
+      uses: actions/setup-go@v2
+      with:
+        go-version: 1.16
+
+    - name: Make the build dir
+      run: mkdir "${{ runner.workspace }}/build"
+      
+    - name: Build
+      run: go build -o ${{ runner.workspace }}/build ./...
+
+    - name: Upload helmz binaries to release
+      uses: svenstaro/upload-release-action@v2
+      with:
+        repo_token: ${{ secrets.GITHUB_TOKEN }}
+        file: ${{ runner.workspace }}/build/${{ matrix.helmz_artifact_name }}
+        asset_name: ${{ matrix.helmz_asset_name }}
+        tag: ${{ github.ref }}
