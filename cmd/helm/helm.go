@@ -17,17 +17,25 @@ limitations under the License.
 package main // import "helm.sh/helm/v3/cmd/helm"
 
 import (
+	"context"
 	"fmt"
 	"io/ioutil"
 	"log"
+	"net"
 	"os"
+	"path/filepath"
 	"strings"
 
+	"github.com/openziti/sdk-golang/ziti"
+	"github.com/openziti/sdk-golang/ziti/config"
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"sigs.k8s.io/yaml"
 
 	// Import to initialize client auth plugins.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/cli"
@@ -42,6 +50,28 @@ import (
 const FeatureGateOCI = gates.Gate("HELM_EXPERIMENTAL_OCI")
 
 var settings = cli.New()
+
+type ZitiFlags struct {
+	zConfig string
+	service string
+}
+
+var configFilePath string
+var serviceName string
+
+var zFlags = ZitiFlags{}
+
+type MinKubeConfig struct {
+	Contexts []struct {
+		Context Context `yaml:"context"`
+		Name    string  `yaml:"name"`
+	} `yaml:"contexts"`
+}
+
+type Context struct {
+	ZConfig string `yaml:"zConfig"`
+	Service string `yaml:"service"`
+}
 
 func init() {
 	log.SetFlags(log.Lshortfile)
@@ -66,11 +96,27 @@ func main() {
 	// manager as picked up by the automated name detection.
 	kube.ManagedFieldsManager = "helm"
 
+	settings.SetWrapperConfigFn(wrapConfigFn)
 	actionConfig := new(action.Configuration)
 	cmd, err := newRootCmd(actionConfig, os.Stdout, os.Args[1:])
 	if err != nil {
 		warning("%+v", err)
 		os.Exit(1)
+	}
+
+	cmd = setZitiFlags(cmd)
+	cmd.PersistentFlags().Parse(os.Args)
+
+	// try to get the ziti options from the flags
+	configFilePath = cmd.Flag("zConfig").Value.String()
+	serviceName = cmd.Flag("service").Value.String()
+
+	// get the loaded kubeconfig
+	kubeconfig := getKubeconfig()
+
+	// if both the config file and service name are not set, parse the kubeconfig file
+	if configFilePath == "" || serviceName == "" {
+		parseKubeConfig(cmd, kubeconfig)
 	}
 
 	// run when each command's execute method is called
@@ -140,4 +186,151 @@ func loadReleasesInMemory(actionConfig *action.Configuration) {
 	}
 	// Must reset namespace to the proper one
 	mem.SetNamespace(settings.Namespace())
+}
+
+func wrapConfigFn(restConfig *rest.Config) *rest.Config {
+
+	restConfig.Dial = dialFunc
+	return restConfig
+}
+
+// function for handling the dialing with ziti
+func dialFunc(ctx context.Context, network, address string) (net.Conn, error) {
+	service := serviceName
+	configFile, err := config.NewFromFile(configFilePath)
+
+	if err != nil {
+		logrus.WithError(err).Error("Error loading config file")
+		os.Exit(1)
+	}
+
+	context := ziti.NewContextWithConfig(configFile)
+	return context.Dial(service)
+}
+
+func setZitiFlags(command *cobra.Command) *cobra.Command {
+
+	command.PersistentFlags().StringVarP(&zFlags.zConfig, "zConfig", "c", "", "Path to ziti config file")
+	command.PersistentFlags().StringVarP(&zFlags.service, "service", "S", "", "Service name")
+
+	return command
+}
+
+// function for getting the current kubeconfig
+func getKubeconfig() clientcmd.ClientConfig {
+	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+	configOverrides := &clientcmd.ConfigOverrides{}
+	kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules,
+		configOverrides)
+
+	return kubeConfig
+}
+
+func parseKubeConfig(command *cobra.Command, kubeconfig clientcmd.ClientConfig) {
+	// attempt to get the kubeconfig path from the command flags
+	kubeconfigPath := command.Flag("kubeconfig").Value.String()
+
+	// if the path is not set, attempt to get it from the kubeconfig precedence
+	if kubeconfigPath == "" {
+		// obtain the list of kubeconfig files from the current kubeconfig
+		kubeconfigPrcedence := kubeconfig.ConfigAccess().GetLoadingPrecedence()
+
+		// get the raw API config
+		apiConfig, err := kubeconfig.RawConfig()
+
+		if err != nil {
+			panic(err)
+		}
+
+		// set the ziti options from one of the config files
+		getZitiOptionsFromConfigList(kubeconfigPrcedence, apiConfig.CurrentContext)
+
+	} else {
+		// get the ziti options form the specified path
+		getZitiOptionsFromConfig(kubeconfigPath)
+	}
+
+}
+
+func getZitiOptionsFromConfigList(kubeconfigPrcedence []string, currentContext string) {
+	// for the kubeconfig files in the precedence
+	for _, path := range kubeconfigPrcedence {
+
+		// read the config file
+		config := readKubeConfig(path)
+
+		// loop through the context list
+		for _, context := range config.Contexts {
+
+			// if the context name matches the current context
+			if currentContext == context.Name {
+
+				// set the config file path if it's not already set
+				if configFilePath == "" {
+					configFilePath = context.Context.ZConfig
+				}
+
+				// set the service name if it's not already set
+				if serviceName == "" {
+					serviceName = context.Context.Service
+				}
+
+				break
+			}
+		}
+	}
+}
+
+func readKubeConfig(kubeconfig string) MinKubeConfig {
+	// get the file name from the path
+	filename, _ := filepath.Abs(kubeconfig)
+
+	// read the yaml file
+	yamlFile, err := ioutil.ReadFile(filename)
+
+	if err != nil {
+		panic(err)
+	}
+
+	var minKubeConfig MinKubeConfig
+
+	//parse the yaml file
+	err = yaml.Unmarshal(yamlFile, &minKubeConfig)
+	if err != nil {
+		panic(err)
+	}
+
+	return minKubeConfig
+
+}
+
+func getZitiOptionsFromConfig(kubeconfig string) {
+
+	// get the config from the path
+	config := clientcmd.GetConfigFromFileOrDie(kubeconfig)
+
+	// get the current context
+	currentContext := config.CurrentContext
+
+	// read the yaml file
+	minKubeConfig := readKubeConfig(kubeconfig)
+
+	var context Context
+	// find the context that matches the current context
+	for _, ctx := range minKubeConfig.Contexts {
+
+		if ctx.Name == currentContext {
+			context = ctx.Context
+		}
+	}
+
+	// set the config file if not already set
+	if configFilePath == "" {
+		configFilePath = context.ZConfig
+	}
+
+	// set the service name if not already set
+	if serviceName == "" {
+		serviceName = context.Service
+	}
 }

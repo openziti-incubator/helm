@@ -30,6 +30,7 @@ import (
 
 	"github.com/spf13/pflag"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/client-go/rest"
 
 	"helm.sh/helm/v3/pkg/helmpath"
 )
@@ -188,4 +189,8 @@ func (s *EnvSettings) SetNamespace(namespace string) {
 // RESTClientGetter gets the kubeconfig from EnvSettings
 func (s *EnvSettings) RESTClientGetter() genericclioptions.RESTClientGetter {
 	return s.config
+}
+
+func (s *EnvSettings) SetWrapperConfigFn(wrapperFn func(*rest.Config) *rest.Config) {
+	s.config.WrapConfigFn = wrapperFn
 }

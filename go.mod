@@ -23,6 +23,7 @@ require (
 	github.com/mattn/go-shellwords v1.0.12
 	github.com/mitchellh/copystructure v1.2.0
 	github.com/opencontainers/image-spec v1.0.2
+	github.com/openziti/sdk-golang v0.15.122 // indirect
 	github.com/phayes/freeport v0.0.0-20180830031419-95f893ade6f2
 	github.com/pkg/errors v0.9.1
 	github.com/rubenv/sql-migrate v0.0.0-20210614095031-55d5740dbbcc
