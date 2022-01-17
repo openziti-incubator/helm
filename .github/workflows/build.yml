@@ -33,7 +33,7 @@ jobs:
       run: mkdir "${{ runner.workspace }}/build"
       
     - name: Build
-      run: go build -o ${{ runner.workspace }}/build ./...
+      run: go build -o ${{ runner.workspace }}/build/${{ matrix.helm_artifact_name }} ./...
 
     - name: Upload helm binaries to release
       uses: svenstaro/upload-release-action@v2
